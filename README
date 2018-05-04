@@ -1,0 +1,81 @@
+This is a php script which uses LLDP information to traverse SNMP servers in a
+network and produce a graphical map of different hosts and connections in the
+network. The graph is produced with the graphviz dot syntax and graphviz can
+be used to produce different file formats like .png or .eps. All connections
+to be identified must have LLDP support at both ends and SNMP support at least
+at one end. Most high end switches have built in support for SNMP and LLDP.
+Computer hosts need something like lldpd together with an SNMP server and the
+SNMP server need to provide the .1.0.8802.1.1.2.1 LLDP information.
+
+Usage examples
+==============
+
+netgraphp -h
+shows some help
+
+netgraphp some.host.in.my.net > /tmp/my_net.dot
+Creates a graphviz dot file.
+
+netgraphp -c my_secret_snmp_community -d some.host.in.net > /tmp/net.dot
+Uses a custom SNMP community to traverse your network.
+
+netgraphp my_switch.net | dot -Tpng -o /tmp/my_net.png
+Uses graphviz dot to create a png file. The network topology will probably look
+best if you give switches as commands on the command line.
+
+netgraphp -d switch1.net switch2.net | dot -Tpdf -o /tmp/my_net.pdf
+Strips domain name from host names and uses graphviz dot to create a .pdf file.
+
+netgraphp -t 2000000 my_switch.net | dot -Teps -o /tmp/my_net.eps
+Increases SNMP timeout to 2s for a slow network and uses dot to create eps.
+
+Dependencies
+============
+PHP compiled with SNMP support
+Graphviz
+Network devices with LLDP and SNMP
+
+Installation
+============
+
+1) Adjust path to php
+As netgraphp is a php script no compilation is necessary. However, to run
+netgraphp you will need php installed and might have to modify the first
+row of the file netgraphp to make that row point to your php binary.
+The line that you might have to edit looks like this:
+#!/usr/bin/php
+
+2) Copy directory structure
+The entire directory structure should be copied to some location that you
+prefer. The important thing is that the filters directory lies next to the
+netgraphp file, this README and the COPYING file is not important for
+functionality but might be good to keep for reference.
+
+3) Adjust PATH in login file
+Unless you want to give the entire path to the netgraphp script like
+/my/preferred/path/netgraphp switch1 host2 -c my_community1 -c other_community
+add the installation directory to your path. How this is done depends upon your
+shell, but if you are an advanced user seeing the use of this tool you probably
+also knows how to modify your PATH :-)
+
+FAQ
+===
+
+Q: Why can't I see my host X in the generated image?
+A: To be shown, both X and the device at the other end of the network cable
+   must support LLDP. Also, at least one of the devices need to provide LLDP
+   information by SNMP and this SNMP server must have been found as an argument
+   to the command line or by traversing other SNMP servers providing SNMP
+   information. Traversing of SNMP servers will only be successful if it is
+   possible to resolve the SysName provided by LLDP.
+
+Q: Why is one of my devices marked gray in the graph?
+A: That device does support LLDP but did not provide any SNMP information, all
+   information about that device was provided by its neighbor. This also means
+   that other devices beyond that device might be hidden as the SNMP traverse
+   stops there.
+
+Q: Why isn't the link speed shown at one of my network connections.
+A: Both ends of that network link did provide SNMP information about the link
+   speed, but they didn't provide the same speed. As least one of those given
+   speeds must be wrong and we don't want to risk presenting any wrong results.

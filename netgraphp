@@ -1,0 +1,554 @@
+#!/usr/bin/php
+<?php
+/************************************************************************
+    Copyright 2016, 2017 Henrik Carlqvist
+
+    This file is part of netgraphp.
+
+    Netgraphp is free software: you can redistribute it and/or modify
+    it under the terms of the GNU General Public License as published by
+    the Free Software Foundation, either version 3 of the License, or
+    (at your option) any later version.
+
+    Netgraphp is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+    GNU General Public License for more details.
+
+    You should have received a copy of the GNU General Public License
+    along with Netgraphp. If not, see <http://www.gnu.org/licenses/>.
+*************************************************************************/
+
+$version = "0.9.0beta";
+$timeout = 500000;
+$bStripDomain = false;
+
+$my_dir = dirname(array_pop(get_included_files()));
+foreach(glob($my_dir . "/filters/*.php") as $filter_inc)
+{
+   include($filter_inc);
+}
+
+function fixos($os)
+{
+  global $description_functions;
+
+  for($i=0; $i<count($description_functions); $i++)
+  {
+    $out=$description_functions[$i]($os);
+    if($out)
+      return $out;
+  }
+  return "Missing filters/99_default.php!";
+} /* fixos */
+
+function geticon($os)
+{
+  global $icon_functions;
+
+  for($i=0; $i<count($icon_functions); $i++)
+  {
+    $out=$icon_functions[$i]($os);
+    if($out)
+      return $out;
+  }
+  return "error_missing_default.png";
+} /* geticon */
+
+function port_to_the_left($os)
+{
+  global $port_side_functions;
+
+  for($i=0; $i<count($port_side_functions); $i++)
+  {
+    $out=$port_side_functions[$i]($os);
+    if($out)
+      return $out;
+  }
+  return FALSE;
+} /* port_to_the_left */
+
+function sanitize_string($data)
+{
+  $data = str_replace("\r", " ", str_replace("\n", " ", $data));
+  $out=$data;
+  for($i=0; $i<strlen($data); $i++)
+  {
+    if((ord($data)>=127)||(ord($data)<32))
+    {
+      $data=$out;
+      $len = strlen($data);
+      $out="";
+      for($i=0; $i<$len; $i++)
+      {
+        $out .= sprintf("%02X", ord($data));
+        $data = substr($data, 1);
+      }
+      break;
+    }
+    $data = substr($data, 1);
+  }
+  return $out;
+}
+
+function snmp2string($data)
+{
+  if(!strncmp("Hex-STRING: ", $data, 12))
+    $out = str_replace(" ", "", substr($data, 12));
+  else
+    $out = sanitize_string(
+              str_replace("\"", "",
+                          str_replace("STRING: \"", "",
+                                      str_replace("Gauge32: ", "", $data))));
+  return $out;
+} /* snmp2string */
+
+function fix_snmp_array(&$data)
+{
+  $data =  snmp2string($data);
+} /* fix_snmp_array */
+
+function host_to_local($host)
+{
+  global $bStripDomain;
+
+  if(!$bStripDomain)
+  {
+    return $host;
+  }
+  $tmp = explode(".", $host);
+  return $tmp[0];
+} /* host_to_local */
+
+function fix_host_to_local(&$data)
+{
+  $data =  host_to_local($data);
+} /* fix_host_to_local */
+
+function local_connection($connid, $portid)
+{
+  foreach($connid as $key => $value)
+  {
+    $conn_arr = explode(".", $key);
+    $conn_num = $conn_arr[count($conn_arr)-2];
+    $currentport="";
+    foreach($portid as $keyp => $valuep)
+    {
+      $port_arr = explode(".", $keyp);
+      $port_num = $port_arr[count($port_arr)-1];
+      if($port_num == $conn_num)
+      {
+        $currentport = $valuep;
+      }
+    }
+    $out[] = $currentport;
+  }
+  return $out;
+} /* local_connection */
+
+function fix_conndescr($connid, $conndescr)
+{
+  foreach($connid as $key => $value)
+  {
+    $descr_key = str_replace("4.1.1.7", "4.1.1.8", $key);
+    if(isset($conndescr[$descr_key]))
+    {
+      $out[$descr_key] = $conndescr[$descr_key];
+    }
+    else
+    {
+      $out[$descr_key] = "";
+    }
+  }
+  return $out;
+} /* fix_conndescr */
+
+function fix_connspeed($connid, $portspeed)
+{
+  foreach($connid as $key => $value)
+  {
+    $speed_key =
+      str_replace("1.0.8802.1.1.2.1.3.7.1.3", "1.3.6.1.2.1.31.1.1.1.15", $key);
+
+    if(isset($portspeed[$speed_key]))
+    {
+      if($portspeed[$speed_key] >= 1000)
+      {
+        $out[$speed_key] = sprintf("%d Gb/s", $portspeed[$speed_key]/1000);
+      }
+      else
+      {
+        $out[$speed_key] = sprintf("%d Mb/s", $portspeed[$speed_key]);
+      }
+    }
+    else
+    {
+      $out[$speed_key] = "";
+    }
+  }
+  return $out;
+} /* fix_connspeed */
+
+function host_data($name, $os, $portid, $portdescr, $portspeed,
+                   $connname, $connos, $connid, $conndescr)
+{
+  if($portid && $portdescr && $connname && $connos && $connid)
+  {
+    $arr = array('name' => host_to_local($name),
+                 'os' => $os,
+                 'portid' => $portid,
+                 'portdescr' => $portdescr,
+                 'connname' => $connname,
+                 'connos' => $connos,
+                 'connid' => $connid,
+                 'conndescr' => $conndescr);
+
+    array_walk($arr['portid'], 'fix_snmp_array');
+    array_walk($arr['portdescr'], 'fix_snmp_array');
+    array_walk($arr['connname'], 'fix_snmp_array');
+    array_walk($arr['connname'], 'fix_host_to_local');
+    array_walk($arr['connos'], 'fix_snmp_array');
+    array_walk($arr['connid'], 'fix_snmp_array');
+    array_walk($portspeed, 'fix_snmp_array');
+    if($conndescr)
+      array_walk($arr['conndescr'], 'fix_snmp_array');
+    $conndescr = fix_conndescr($connid, $conndescr);
+    $connspeed = fix_connspeed($portid, $portspeed);
+
+    $arr['localid'] = local_connection($arr['connid'], $arr['portid']);
+    $arr['portid'] = array_values($arr['portid']);
+    $arr['portdescr'] = array_values($arr['portdescr']);
+    $arr['connname'] = array_values($arr['connname']);
+    $arr['connos'] = array_values($arr['connos']);
+    $arr['connid'] = array_values($arr['connid']);
+    $arr['conndescr'] = array_values($arr['conndescr']);
+    $arr['connspeed'] = array_values($connspeed);
+
+    return $arr;
+  }
+  else
+  {
+    return false;
+  }
+} /* host_data */
+
+if (($_SERVER["argc"] < 2)||($_SERVER["argv"][1]=="-h")||($_SERVER["argv"][1]=="-v")||
+    ($_SERVER["argv"][1]=="--help")||($_SERVER["argv"][1]=="--version"))
+{
+   printf("netgraphp version %s\n", $version);
+   printf(
+      "Usage: %s [option...] <host> [host...]\n",
+      $_SERVER["argv"][0]);
+   printf("  -c community      SNMP community, with multiple -c multiple\n" .
+	  "                    communities will be searched for each host.\n");
+   printf("  -t timeout        SNMP timeout in us, default 500000 us (0.5 s).\n");
+   printf("  -d                Strip domain from host names.\n");
+   printf("  -h                Shows this help.\n");
+   return 1;
+}
+else
+{
+  $bCommunity=false;
+  $bTimeOut=false;
+  for($i=1; $i<$_SERVER["argc"]; $i++)
+  {
+    if($bCommunity)
+    {
+      $Communities[] = $_SERVER["argv"][$i];
+      $bCommunity = false;
+    }
+    else if($bTimeOut)
+    {
+      $timeout = $_SERVER["argv"][$i];
+      $bTimeOut = false;
+    }
+    else
+    {
+      if($_SERVER["argv"][$i]=="-c")
+      {
+	$bCommunity = true;
+      }
+      else if($_SERVER["argv"][$i]=="-d")
+      {
+	$bStripDomain = true;
+      }
+      else if($_SERVER["argv"][$i]=="-t")
+      {
+	$bTimeOut = true;
+      }
+      else
+      {
+	$HostsToSearch[] = $_SERVER["argv"][$i];
+      }
+    }
+  }
+  $Communities[] = "public";
+  if(!isset($HostsToSearch))
+  {
+    printf("Usage: %s [-c community] <host> [host...]\n", $_SERVER["argv"][0]);
+    printf("At least one host must be given to start with!\n");
+    return 2;
+  }
+  $HostsToSearch = array_values(array_unique($HostsToSearch));
+  for($i=0; $i<count($Communities); $i++)
+  {
+    /* printf("Community: %s\n", $Communities[$i]); */
+  }
+  snmp_set_valueretrieval(SNMP_VALUE_LIBRARY);
+  snmp_set_oid_output_format(SNMP_OID_OUTPUT_NUMERIC);
+  for($i=0; $i<count($HostsToSearch); $i++)
+  {
+    $current_host_found=FALSE;
+    for($j=0; $j<count($Communities); $j++)
+    {
+      if(($hostname=snmp2_get($HostsToSearch[$i], $Communities[$j],
+			     ".1.0.8802.1.1.2.1.3.3.0", $timeout, 3)) &&
+	 ($os=snmp2_get($HostsToSearch[$i], $Communities[$j],
+			".1.0.8802.1.1.2.1.3.4.0", $timeout, 3)))
+      {
+        $new_host =
+          host_data(snmp2string($hostname),
+                    snmp2string($os),
+                    snmp2_real_walk($HostsToSearch[$i],
+                                    $Communities[$j],
+                                    ".1.0.8802.1.1.2.1.3.7.1.3",
+                                    $timeout, 3),
+		    snmp2_real_walk($HostsToSearch[$i],
+				    $Communities[$j],
+				    ".1.0.8802.1.1.2.1.3.7.1.4",
+				    $timeout, 3),
+		    snmp2_real_walk($HostsToSearch[$i],
+				    $Communities[$j],
+				    ".1.3.6.1.2.1.31.1.1.1.15",
+				    $timeout, 3),
+		    snmp2_real_walk($HostsToSearch[$i],
+				    $Communities[$j],
+				    ".1.0.8802.1.1.2.1.4.1.1.9",
+				    $timeout, 3),
+		    snmp2_real_walk($HostsToSearch[$i],
+				    $Communities[$j],
+				    ".1.0.8802.1.1.2.1.4.1.1.10",
+				    $timeout, 3),
+		    snmp2_real_walk($HostsToSearch[$i],
+				    $Communities[$j],
+				    ".1.0.8802.1.1.2.1.4.1.1.7",
+				    $timeout, 3),
+		    snmp2_real_walk($HostsToSearch[$i],
+				    $Communities[$j],
+				    ".1.0.8802.1.1.2.1.4.1.1.8",
+				    $timeout, 3)
+		    );
+	if(!$new_host)
+	{
+          error_log(
+            sprintf("Unable to get all info from host %s, community %s\n",
+                    $HostsToSearch[$i], $Communities[$j]));
+	}
+	else
+        {
+	  $current_host_found=TRUE;
+          if(!isset($HostsFound) || !in_array($new_host, $HostsFound))
+          {
+            $HostsFound[] = $new_host;
+            for($k=0;
+                $k<count($HostsFound[count($HostsFound)-1]['connname']);
+                $k++)
+            {
+              $newname=
+                 host_to_local(
+                    snmp2string(
+                       $HostsFound[count($HostsFound)-1]['connname'][$k]));
+
+              if(FALSE==in_array($newname, $HostsToSearch, TRUE))
+              {
+                $HostsToSearch[] = $newname;
+              }
+            }
+          }
+        }
+      }
+      else
+      {
+        error_log(sprintf("Unable to get info from host %s, community %s\n",
+                          $HostsToSearch[$i], $Communities[$j]));
+      }
+    }
+    if(!$current_host_found)
+    {
+      $HostsNotFound[$HostsToSearch[$i]]['set'] = TRUE;
+      error_log(sprintf("Host %s will be marked gray\n", $HostsToSearch[$i]));
+    }
+  }
+  for($i=0; $i<count($HostsFound); $i++)
+  {
+    if(isset($HostsNotFound[$HostsFound[$i]['name']]))
+    {
+      unset($HostsNotFound[$HostsFound[$i]['name']]);
+      error_log(sprintf("Host %s was found later\n", $HostsFound[$i]['name']));
+    }
+  }
+  for($i=0; $i<count($HostsFound); $i++)
+  {
+    for($j=0; $j<count($HostsFound[$i]['portid']); $j++)
+    {
+      for($k=$i; $k<count($HostsFound); $k++)
+      {
+        /* Also search for connections to own host, but avoid duplicates */
+        for($l=($i==$k ? $j+1 : 0); $l<count($HostsFound[$k]['connid']); $l++)
+	{
+	  if(($HostsFound[$k]['connname'][$l]==$HostsFound[$i]['name']) &&
+	     ($HostsFound[$k]['connid'][$l]==$HostsFound[$i]['portid'][$j]))
+	  {
+	    for($m=0; $m<count($HostsFound[$i]['connid']); $m++)
+	    {
+	      for($n=0; $n<count($HostsFound[$k]['portid']); $n++)
+	      {
+		if(($HostsFound[$i]['connname'][$m]==
+                    $HostsFound[$k]['name']) &&
+		   ($HostsFound[$i]['connid'][$m]==
+                    $HostsFound[$k]['portid'][$n]) &&
+                   ($HostsFound[$i]['localid'][$m] ==
+                    $HostsFound[$k]['connid'][$l]))
+		{
+                  if(!strcmp($HostsFound[$i]['connspeed'][$j],
+                             $HostsFound[$k]['connspeed'][$n]))
+                  {
+                    $label = "\"" . $HostsFound[$i]['connspeed'][$j] . "\"";
+                  }
+                  else
+                  {
+                    $label ="\"\"";
+                  }
+		  $ConnectionsFound[] =
+                    array(1 => "\"" .
+		               $HostsFound[$i]['name'] . "\":\"" .
+			       $HostsFound[$i]['portid'][$j] . "_" .
+			       $HostsFound[$i]['portdescr'][$j] . "\"",
+	 	          2 => "\"" .
+			       $HostsFound[$k]['name'] . "\":\"" .
+			       $HostsFound[$k]['portid'][$n] . "_" .
+			       $HostsFound[$k]['portdescr'][$n]. "\"",
+                          3 => $label);
+		}
+	      }
+	    }
+	  }
+	}
+      }
+    }
+    for($l=0; $l<count($HostsFound[$i]['connid']); $l++)
+    {
+      if(isset($HostsNotFound[$HostsFound[$i]['connname'][$l]]))
+      {
+	$HostsNotFound[$HostsFound[$i]['connname'][$l]]['portid'][] =
+	  $HostsFound[$i]['connid'][$l];
+	$HostsNotFound[$HostsFound[$i]['connname'][$l]]['portdescr'][] =
+	   $HostsFound[$i]['conndescr'][$l];
+	$HostsNotFound[$HostsFound[$i]['connname'][$l]]['os'] = 
+	   $HostsFound[$i]['connos'][$l];
+	$tmp = array_flip($HostsFound[$i]['portid']);
+	$ConnectionsFound[] =
+	   array(1 => "\"" .
+		 $HostsFound[$i]['name'] . "\":\"" .
+		 $HostsFound[$i]['localid'][$l] . "_" .
+		 $HostsFound[$i]['portdescr'][$tmp[$HostsFound[$i]['localid'][$l]]] . "\"",
+		 2 => "\"" .
+		 $HostsFound[$i]['connname'][$l] . "\":\"" .
+		 $HostsFound[$i]['connid'][$l] . "_" .
+		 $HostsFound[$i]['conndescr'][$l] . "\"",
+		 3 => "\"" . $HostsFound[$i]['connspeed'][$tmp[$HostsFound[$i]['localid'][$l]]] . "\"");
+      }
+    }
+  }
+  printf("digraph Network {\nnode [shape=plaintext]\n");
+  printf("rankdir=RL\n");
+  printf("ranksep=5.0\n");
+  printf("nodesep=0.5\n");
+  printf("remincross=true\n");
+
+  for($i=0; $i<count($HostsFound); $i++)
+  {
+    $os=fixos($HostsFound[$i]['os']);
+    $icon=geticon($HostsFound[$i]['os']);
+
+    printf("\"%s\" [label=<<TABLE>\n", $HostsFound[$i]['name']);
+    printf(
+      "<TR><TD ROWSPAN=\"2\" BORDER=\"0\"><IMG src=\"%s\"/></TD>\n", $icon);
+    printf("<TD BORDER=\"0\">%s</TD></TR>\n", $HostsFound[$i]['name']);
+    printf(
+      "<TR><TD BORDER=\"0\">%s</TD></TR>\n", $os);
+    printf("<TR><TD COLSPAN=\"2\" BORDER=\"0\">\n");
+    printf("<TABLE BORDER=\"0\">\n");
+    for($j=0; $j<count($HostsFound[$i]['portid']); $j++)
+    {
+      if(port_to_the_left($HostsFound[$i]['os']))
+      {
+	printf("<TR><TD BORDER=\"1\" PORT=\"%s\">%s</TD><TD>%s</TD></TR>\n",
+	       $HostsFound[$i]['portid'][$j] . "_" .
+	       $HostsFound[$i]['portdescr'][$j],
+	       $HostsFound[$i]['portid'][$j],
+	       $HostsFound[$i]['portdescr'][$j]);
+      }
+      else
+      {
+	printf("<TR><TD>%s</TD><TD BORDER=\"1\" PORT=\"%s\">%s</TD></TR>\n",
+	       $HostsFound[$i]['portid'][$j],
+	       $HostsFound[$i]['portid'][$j] . "_" .
+	       $HostsFound[$i]['portdescr'][$j],
+	       $HostsFound[$i]['portdescr'][$j]);
+      }
+    }
+    printf("</TABLE></TD></TR>\n</TABLE>>]\n\n");
+  }
+
+  if(isset($HostsNotFound))
+  {
+    foreach($HostsNotFound as $key => $value)
+    {
+      if(isset($value['os'])) /* If this isn't set we have no connection */
+      {
+	$os=fixos($value['os']);
+	$icon=geticon($value['os']);
+	printf("\"%s\" [style=filled, label=<<TABLE>\n", $key);
+	printf(
+	  "<TR><TD ROWSPAN=\"2\" BORDER=\"0\"><IMG src=\"%s\"/></TD>\n",$icon);
+	printf("<TD BORDER=\"0\">%s</TD></TR>\n", $key);
+	printf(
+	       "<TR><TD BORDER=\"0\">%s</TD></TR>\n", fixos($os));
+	printf("<TR><TD COLSPAN=\"2\" BORDER=\"0\">\n");
+	printf("<TABLE BORDER=\"0\">\n");
+	for($j=0; $j<count($value['portid']); $j++)
+	{
+	  if(port_to_the_left($value['os']))
+	  {
+	    printf(
+	      "<TR><TD BORDER=\"1\" PORT=\"%s\">%s</TD><TD>%s</TD></TR>\n",
+	      $value['portid'][$j] . "_" .
+	      $value['portdescr'][$j],
+	      $value['portid'][$j],
+	      $value['portdescr'][$j]);
+	  }
+	  else
+	  {
+	    printf(
+	      "<TR><TD>%s</TD><TD BORDER=\"1\" PORT=\"%s\">%s</TD></TR>\n",
+	      $value['portid'][$j],
+	      $value['portid'][$j] . "_" .
+	      $value['portdescr'][$j],
+	      $value['portdescr'][$j]);
+	  }
+	}
+	printf("</TABLE></TD></TR>\n</TABLE>>]\n\n");
+      }
+    }
+  }
+  
+  for($i=0; $i<count($ConnectionsFound); $i++)
+  {
+    printf("%s -> %s[dir=none, label=%s];\n",
+	   $ConnectionsFound[$i][1], $ConnectionsFound[$i][2],
+           $ConnectionsFound[$i][3]);
+  }
+  printf("}\n");
+}
+?>
